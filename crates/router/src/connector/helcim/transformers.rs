@@ -1,3 +1,7 @@
+use api_models::{
+    enums::{BankHolderType, BankType},
+    payments::BankDebitData,
+};
 use common_utils::pii::{Email, IpAddress};
 use error_stack::{IntoReport, ResultExt};
 use masking::Secret;
@@ -61,7 +65,8 @@ pub struct HelcimPaymentsRequest {
     amount: f64,
     currency: enums::Currency,
     ip_address: Secret<String, IpAddress>,
-    card_data: HelcimCard,
+    card_data: Option<HelcimCard>,
+    bank_data: Option<HelcimBank>,
     billing_address: HelcimBillingAddress,
     //The ecommerce field is an optional field in Connector Helcim.
     //Setting the ecommerce field to true activates the Helcim Fraud Defender.
@@ -89,6 +94,23 @@ pub struct HelcimCard {
     card_number: cards::CardNumber,
     card_expiry: Secret<String>,
     card_c_v_v: Secret<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HelcimBank {
+    bank_account_number: Secret<String>,
+    routing_number: Secret<String>,
+    account_type: String,
+    account_corporate: String,
+    first_name: Secret<String>,
+    last_name: Secret<String>,
+    company_name: Secret<String>,
+    street_address: Secret<String>,
+    city: String,
+    country: Secret<String>,
+    province: Secret<String>,
+    postal_code: Secret<String>,
 }
 
 impl TryFrom<(&types::SetupMandateRouterData, &api::Card)> for HelcimVerifyRequest {
@@ -127,15 +149,12 @@ impl TryFrom<&types::SetupMandateRouterData> for HelcimVerifyRequest {
     fn try_from(item: &types::SetupMandateRouterData) -> Result<Self, Self::Error> {
         match item.request.payment_method_data.clone() {
             api::PaymentMethodData::Card(req_card) => Self::try_from((item, &req_card)),
-            api_models::payments::PaymentMethodData::BankTransfer(_) => Err(
-                errors::ConnectorError::NotImplemented("Payment Method".to_string()),
-            )
-            .into_report(),
             api_models::payments::PaymentMethodData::CardRedirect(_)
             | api_models::payments::PaymentMethodData::Wallet(_)
             | api_models::payments::PaymentMethodData::PayLater(_)
             | api_models::payments::PaymentMethodData::BankRedirect(_)
             | api_models::payments::PaymentMethodData::BankDebit(_)
+            | api_models::payments::PaymentMethodData::BankTransfer(_)
             | api_models::payments::PaymentMethodData::Crypto(_)
             | api_models::payments::PaymentMethodData::MandatePayment
             | api_models::payments::PaymentMethodData::Reward
@@ -165,17 +184,12 @@ impl
         ),
     ) -> Result<Self, Self::Error> {
         let (item, req_card) = value;
-        let card_data = HelcimCard {
+        let card_data = Some(HelcimCard {
             card_expiry: req_card.get_card_expiry_month_year_2_digit_with_delimiter("".to_string()),
             card_number: req_card.card_number.clone(),
             card_c_v_v: req_card.card_cvc.clone(),
-        };
-        let req_address = item
-            .router_data
-            .get_billing()?
-            .to_owned()
-            .address
-            .ok_or_else(utils::missing_field_err("billing.address"))?;
+        });
+        let req_address = item.router_data.get_billing_address()?.to_owned();
 
         let billing_address = HelcimBillingAddress {
             name: req_address.get_full_name()?,
@@ -196,8 +210,95 @@ impl
             currency: item.router_data.request.currency,
             ip_address,
             card_data,
+            bank_data: None,
             billing_address,
             ecommerce: None,
+        })
+    }
+}
+
+impl
+    TryFrom<(
+        &HelcimRouterData<&types::PaymentsAuthorizeRouterData>,
+        BankDebitData,
+    )> for HelcimPaymentsRequest
+{
+    type Error = error_stack::Report<errors::ConnectorError>;
+    fn try_from(
+        value: (
+            &HelcimRouterData<&types::PaymentsAuthorizeRouterData>,
+            BankDebitData,
+        ),
+    ) -> Result<Self, Self::Error> {
+        let (item, bank_debit_data) = value;
+
+        let req_address = item.router_data.get_billing_address()?.to_owned();
+        let city = req_address.city.clone();
+        let street1 = req_address.get_line1()?.to_owned();
+        let postal_code = req_address.get_zip()?.to_owned();
+
+        let bank_data = match bank_debit_data {
+            BankDebitData::AchBankDebit {
+                billing_details,
+                account_number,
+                routing_number,
+                bank_type,
+                bank_holder_type,
+                ..
+            } => Some(HelcimBank {
+                bank_account_number: account_number,
+                routing_number: routing_number,
+                // account_type: bank_type.clone().ok_or(
+                //     errors::ConnectorError::MissingRequiredField {
+                //         field_name: "bank_type",
+                //     },
+                // )?,
+                // account_corporate: bank_holder_type.clone().ok_or(
+                //     errors::ConnectorError::MissingRequiredField {
+                //         field_name: "bank_holder_type",
+                //     },
+                // )?,
+                account_type: "CHECKING".to_string(),
+                account_corporate: "PERSONAL".to_string(),
+                first_name: req_address.get_first_name()?.clone(),
+                last_name: req_address.get_last_name()?.to_owned(),
+                company_name: billing_details.name,
+                street_address: street1.clone(),
+                city: city
+                    .clone()
+                    .ok_or(errors::ConnectorError::MissingRequiredField { field_name: "city" })?,
+                postal_code: postal_code.clone(),
+                country: Secret::new("USA".to_string()),
+                province: Secret::new("CA".to_string()),
+            }),
+            BankDebitData::SepaBankDebit { .. }
+            | BankDebitData::BecsBankDebit { .. }
+            | BankDebitData::BacsBankDebit { .. } => None,
+        };
+
+        let billing_address = HelcimBillingAddress {
+            name: req_address.get_full_name()?,
+            street1,
+            postal_code,
+            street2: req_address.line2,
+            city,
+            email: item.router_data.request.email.clone(),
+        };
+
+        let ip_address = item
+            .router_data
+            .request
+            .get_browser_info()?
+            .get_ip_address()?;
+
+        Ok(Self {
+            amount: item.amount.to_owned(),
+            currency: item.router_data.request.currency,
+            ip_address,
+            card_data: None,
+            billing_address,
+            ecommerce: None,
+            bank_data,
         })
     }
 }
@@ -209,15 +310,14 @@ impl TryFrom<&HelcimRouterData<&types::PaymentsAuthorizeRouterData>> for HelcimP
     ) -> Result<Self, Self::Error> {
         match item.router_data.request.payment_method_data.clone() {
             api::PaymentMethodData::Card(req_card) => Self::try_from((item, &req_card)),
-            api_models::payments::PaymentMethodData::BankTransfer(_) => Err(
-                errors::ConnectorError::NotImplemented("Payment Method".to_string()),
-            )
-            .into_report(),
+            api_models::payments::PaymentMethodData::BankDebit(bank_debit_data) => {
+                Self::try_from((item, bank_debit_data))
+            }
             api_models::payments::PaymentMethodData::CardRedirect(_)
             | api_models::payments::PaymentMethodData::Wallet(_)
             | api_models::payments::PaymentMethodData::PayLater(_)
             | api_models::payments::PaymentMethodData::BankRedirect(_)
-            | api_models::payments::PaymentMethodData::BankDebit(_)
+            | api_models::payments::PaymentMethodData::BankTransfer(_)
             | api_models::payments::PaymentMethodData::Crypto(_)
             | api_models::payments::PaymentMethodData::MandatePayment
             | api_models::payments::PaymentMethodData::Reward
@@ -249,26 +349,9 @@ impl TryFrom<&types::ConnectorAuthType> for HelcimAuthType {
         }
     }
 }
-// PaymentsResponse
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
-pub enum HelcimPaymentStatus {
-    Approved,
-    Declined,
-}
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum HelcimTransactionType {
-    Purchase,
-    PreAuth,
-    Capture,
-    Verify,
-    Reverse,
-}
-
-impl From<HelcimPaymentsResponse> for enums::AttemptStatus {
-    fn from(item: HelcimPaymentsResponse) -> Self {
+impl From<Box<HelcimCardPaymentsResponse>> for enums::AttemptStatus {
+    fn from(item: Box<HelcimCardPaymentsResponse>) -> Self {
         match item.transaction_type {
             HelcimTransactionType::Purchase | HelcimTransactionType::Verify => match item.status {
                 HelcimPaymentStatus::Approved => Self::Charged,
@@ -290,13 +373,89 @@ impl From<HelcimPaymentsResponse> for enums::AttemptStatus {
     }
 }
 
-#[derive(Debug, Deserialize)]
+impl From<Box<HelcimBankPaymentsResponse>> for enums::AttemptStatus {
+    fn from(item: Box<HelcimBankPaymentsResponse>) -> Self {
+        match item.transaction_type {
+            HelcimACHTransactionType::Withdrawal => todo!(),
+            HelcimACHTransactionType::Deposit => todo!(),
+            HelcimACHTransactionType::Settle => todo!(),
+            HelcimACHTransactionType::Reverse => todo!(),
+            HelcimACHTransactionType::Refund => todo!(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum HelcimPaymentStatusAuth {
+    Approved,
+    Declined,
+    InProgress,
+    Cancelled,
+    Pending,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum HelcimPaymentStatusClearing {
+    Opened,
+    Cleared,
+    Rejected,
+    Contested,
+    Returned,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HelcimACHTransactionType {
+    Withdrawal,
+    Deposit,
+    Settle,
+    Reverse,
+    Refund,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct HelcimPaymentsResponse {
+pub struct HelcimBankPaymentsResponse {
+    status_clearing: HelcimPaymentStatusClearing,
+    statu_auth: HelcimPaymentStatusAuth,
+    transaction_id: u64,
+    #[serde(rename = "type")]
+    transaction_type: HelcimACHTransactionType,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum HelcimPaymentStatus {
+    Approved,
+    Declined,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HelcimTransactionType {
+    Purchase,
+    PreAuth,
+    Capture,
+    Verify,
+    Reverse,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HelcimCardPaymentsResponse {
     status: HelcimPaymentStatus,
     transaction_id: u64,
     #[serde(rename = "type")]
     transaction_type: HelcimTransactionType,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum HelcimPaymentsResponse {
+    CardResponse(Box<HelcimCardPaymentsResponse>),
+    ACHResponse(Box<HelcimBankPaymentsResponse>),
 }
 
 impl<F>
@@ -318,20 +477,27 @@ impl<F>
             types::PaymentsResponseData,
         >,
     ) -> Result<Self, Self::Error> {
-        Ok(Self {
-            response: Ok(types::PaymentsResponseData::TransactionResponse {
-                resource_id: types::ResponseId::ConnectorTransactionId(
-                    item.response.transaction_id.to_string(),
-                ),
-                redirection_data: None,
-                mandate_reference: None,
-                connector_metadata: None,
-                network_txn_id: None,
-                connector_response_reference_id: None,
+        match item.response {
+            HelcimPaymentsResponse::CardResponse(card_response) => Ok(Self {
+                response: Ok(types::PaymentsResponseData::TransactionResponse {
+                    resource_id: types::ResponseId::ConnectorTransactionId(
+                        card_response.transaction_id.to_string(),
+                    ),
+                    redirection_data: None,
+                    mandate_reference: None,
+                    connector_metadata: None,
+                    network_txn_id: None,
+                    connector_response_reference_id: None,
+                }),
+                status: enums::AttemptStatus::from(card_response),
+                ..item.data
             }),
-            status: enums::AttemptStatus::from(item.response),
-            ..item.data
-        })
+            HelcimPaymentsResponse::ACHResponse(_) => Err(errors::ConnectorError::NotSupported {
+                message: format!("{:?}", item.data.request.payment_method_data),
+                connector: "Helcim",
+            })
+            .into_report(),
+        }
     }
 }
 
@@ -359,33 +525,51 @@ impl<F>
             types::PaymentsResponseData,
         >,
     ) -> Result<Self, Self::Error> {
-        //PreAuth Transaction ID is stored in connector metadata
-        //Initially resource_id is stored as NoResponseID for manual capture
-        //After Capture Transaction is completed it is updated to store the Capture ID
-        let resource_id = if item.data.request.is_auto_capture()? {
-            types::ResponseId::ConnectorTransactionId(item.response.transaction_id.to_string())
-        } else {
-            types::ResponseId::NoResponseId
-        };
-        let connector_metadata = if !item.data.request.is_auto_capture()? {
-            Some(serde_json::json!(HelcimMetaData {
-                preauth_transaction_id: item.response.transaction_id,
-            }))
-        } else {
-            None
-        };
-        Ok(Self {
-            response: Ok(types::PaymentsResponseData::TransactionResponse {
-                resource_id,
-                redirection_data: None,
-                mandate_reference: None,
-                connector_metadata,
-                network_txn_id: None,
-                connector_response_reference_id: None,
+        match item.response {
+            HelcimPaymentsResponse::CardResponse(card_response) => {
+                //PreAuth Transaction ID is stored in connector metadata
+                //Initially resource_id is stored as NoResponseID for manual capture
+                //After Capture Transaction is completed it is updated to store the Capture ID
+                let resource_id = if item.data.request.is_auto_capture()? {
+                    types::ResponseId::ConnectorTransactionId(
+                        card_response.transaction_id.to_string(),
+                    )
+                } else {
+                    types::ResponseId::NoResponseId
+                };
+                let connector_metadata = if !item.data.request.is_auto_capture()? {
+                    Some(serde_json::json!(HelcimMetaData {
+                        preauth_transaction_id: card_response.transaction_id,
+                    }))
+                } else {
+                    None
+                };
+                Ok(Self {
+                    response: Ok(types::PaymentsResponseData::TransactionResponse {
+                        resource_id,
+                        redirection_data: None,
+                        mandate_reference: None,
+                        connector_metadata,
+                        network_txn_id: None,
+                        connector_response_reference_id: None,
+                    }),
+                    status: enums::AttemptStatus::from(card_response),
+                    ..item.data
+                })
+            }
+            HelcimPaymentsResponse::ACHResponse(ach_response) => Ok(Self {
+                response: Ok(types::PaymentsResponseData::TransactionResponse {
+                    resource_id: ach_response.transaction_id,
+                    redirection_data: None,
+                    mandate_reference: None,
+                    connector_metadata: None,
+                    network_txn_id: None,
+                    connector_response_reference_id: None,
+                }),
+                status: enums::AttemptStatus::from(ach_response),
+                ..item.data
             }),
-            status: enums::AttemptStatus::from(item.response),
-            ..item.data
-        })
+        }
     }
 }
 

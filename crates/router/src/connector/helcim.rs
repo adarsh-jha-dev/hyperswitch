@@ -260,10 +260,33 @@ impl ConnectorIntegration<api::Authorize, types::PaymentsAuthorizeData, types::P
         req: &types::PaymentsAuthorizeRouterData,
         connectors: &settings::Connectors,
     ) -> CustomResult<String, errors::ConnectorError> {
-        if req.request.is_auto_capture()? {
-            return Ok(format!("{}v2/payment/purchase", self.base_url(connectors)));
+        match req.request.payment_method_data {
+            api_models::payments::PaymentMethodData::Card(_) => {
+                if req.request.is_auto_capture()? {
+                    return Ok(format!("{}v2/payment/purchase", self.base_url(connectors)));
+                }
+                Ok(format!("{}v2/payment/preauth", self.base_url(connectors)))
+            }
+            api_models::payments::PaymentMethodData::BankDebit(_) => {
+                Ok(format!("{}v2/payment/withdraw", self.base_url(connectors)))
+            }
+            api_models::payments::PaymentMethodData::Wallet(_)
+            | api_models::payments::PaymentMethodData::PayLater(_)
+            | api_models::payments::PaymentMethodData::BankRedirect(_)
+            | api_models::payments::PaymentMethodData::CardRedirect(_)
+            | api_models::payments::PaymentMethodData::BankTransfer(_)
+            | api_models::payments::PaymentMethodData::Crypto(_)
+            | api_models::payments::PaymentMethodData::MandatePayment
+            | api_models::payments::PaymentMethodData::Reward
+            | api_models::payments::PaymentMethodData::Upi(_)
+            | api_models::payments::PaymentMethodData::Voucher(_)
+            | api_models::payments::PaymentMethodData::GiftCard(_) => {
+                Err(errors::ConnectorError::NotSupported {
+                    message: format!("{:?}", req.request.payment_method_data),
+                    connector: "Helcim",
+                })?
+            }
         }
-        Ok(format!("{}v2/payment/preauth", self.base_url(connectors)))
     }
 
     fn get_request_body(
@@ -277,6 +300,12 @@ impl ConnectorIntegration<api::Authorize, types::PaymentsAuthorizeData, types::P
             req,
         ))?;
         let req_obj = helcim::HelcimPaymentsRequest::try_from(&connector_router_data)?;
+
+        let helcimrequest =
+            utils::Encode::<helcim::HelcimPaymentsRequest>::encode_to_string_of_json(&req_obj)
+                .change_context(errors::ConnectorError::RequestEncodingFailed)?;
+        println!("$$$$$ {:?}", helcimrequest);
+
         let helcim_req = types::RequestBody::log_and_get_request_body(
             &req_obj,
             utils::Encode::<helcim::HelcimPaymentsRequest>::encode_to_string_of_json,
