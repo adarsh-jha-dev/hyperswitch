@@ -94,6 +94,10 @@ impl ConnectorCommon for Payeezy {
         "application/json"
     }
 
+    fn get_currency_unit(&self) -> api::CurrencyUnit {
+        api::CurrencyUnit::Minor
+    }
+
     fn base_url<'a>(&self, connectors: &'a settings::Connectors) -> &'a str {
         connectors.payeezy.base_url.as_ref()
     }
@@ -469,7 +473,13 @@ impl ConnectorIntegration<api::Execute, types::RefundsData, types::RefundsRespon
         &self,
         req: &types::RefundsRouterData<api::Execute>,
     ) -> CustomResult<Option<types::RequestBody>, errors::ConnectorError> {
-        let connector_req = payeezy::PayeezyRefundRequest::try_from(req)?;
+        let connector_router_data = payeezy::PayeezyRouterData::try_from((
+            &self.get_currency_unit(),
+            req.request.currency,
+            req.request.amount,
+            req,
+        ))?;
+        let connector_req = payeezy::PaymentsRequest::try_from(&connector_router_data)?;
         let payeezy_req = types::RequestBody::log_and_get_request_body(
             &connector_req,
             utils::Encode::<payeezy::PayeezyCaptureOrVoidRequest>::encode_to_string_of_json,
