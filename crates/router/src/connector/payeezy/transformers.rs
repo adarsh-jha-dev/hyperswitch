@@ -2,6 +2,7 @@ use cards::CardNumber;
 use common_utils::ext_traits::Encode;
 use error_stack::ResultExt;
 use masking::Secret;
+use core::convert::TryFrom;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -63,7 +64,7 @@ pub struct PayeezyPaymentsRequest {
     pub merchant_ref: String,
     pub transaction_type: PayeezyTransactionType,
     pub method: PayeezyPaymentMethodType,
-    pub amount: i64,
+    pub amount: i64, // Change the data type to i64 for minor units
     pub currency_code: String,
     pub credit_card: PayeezyPaymentMethod,
     pub stored_credentials: Option<StoredCredentials>,
@@ -107,7 +108,7 @@ fn get_card_specific_payment_data(
 ) -> Result<PayeezyPaymentsRequest, error_stack::Report<errors::ConnectorError>> {
     let merchant_ref = item.attempt_id.to_string();
     let method = PayeezyPaymentMethodType::CreditCard;
-    let amount = item.request.amount;
+    let amount = item.request.amount * 100; // Convert to minor units
     let currency_code = item.request.currency.to_string();
     let credit_card = get_payment_method_data(item)?;
     let (transaction_type, stored_credentials) = get_transaction_type_and_stored_creds(item)?;
@@ -136,7 +137,7 @@ fn get_transaction_type_and_stored_creds(
             _ => None,
         }
     });
-    let (transaction_type, stored_credentials) =
+   let (transaction_type, stored_credentials) =
         if is_mandate_payment(item, connector_mandate_id.as_ref()) {
             // Mandate payment
             (
@@ -153,7 +154,7 @@ fn get_transaction_type_and_stored_creds(
                         _ => Initiator::CardHolder,
                     },
                     is_scheduled: true,
-                    // In case of first mandate payment connector_mandate_id would be None, otherwise holds some value
+                    // In case of the first mandate payment connector_mandate_id would be None, otherwise, it holds some value
                     cardbrand_original_transaction_id: connector_mandate_id,
                 }),
             )
@@ -168,7 +169,7 @@ fn get_transaction_type_and_stored_creds(
                 _ => Err(errors::ConnectorError::FlowNotSupported {
                     flow: item.request.capture_method.unwrap_or_default().to_string(),
                     connector: "Payeezy".to_string(),
-                }),
+                })?,
             }?
         };
     Ok((transaction_type, stored_credentials))
