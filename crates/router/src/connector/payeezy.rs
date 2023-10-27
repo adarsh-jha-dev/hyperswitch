@@ -90,6 +90,10 @@ impl ConnectorCommon for Payeezy {
         "payeezy"
     }
 
+    fn get_currency_unit(&self) -> api::CurrencyUnit {
+        api::CurrencyUnit::Minor
+    }
+
     fn common_get_content_type(&self) -> &'static str {
         "application/json"
     }
@@ -467,16 +471,23 @@ impl ConnectorIntegration<api::Execute, types::RefundsData, types::RefundsRespon
 
     fn get_request_body(
         &self,
-        req: &types::RefundsRouterData<api::Execute>,
+        req: &types::PaymentsAuthorizeRouterData,
     ) -> CustomResult<Option<types::RequestBody>, errors::ConnectorError> {
-        let connector_req = payeezy::PayeezyRefundRequest::try_from(req)?;
+        let connector_req = payeezy::PayeezyPaymentsRequest::try_from(req)?;
+        let connector_router_data = payeezy::WorldlineRouterData::try_from((
+            &self.get_currency_unit(),
+            req.request.currency,
+            req.request.amount,
+            req,
+        ))?;
+        let connector_req = payeezy::PaymentsRequest::try_from(&connector_router_data)?;
         let payeezy_req = types::RequestBody::log_and_get_request_body(
             &connector_req,
-            utils::Encode::<payeezy::PayeezyCaptureOrVoidRequest>::encode_to_string_of_json,
-        )
-        .change_context(errors::ConnectorError::RequestEncodingFailed)?;
+            utils::Encode::<payeezy::PaymentsRequest>::encode_to_string_of_json,
+        )?;
         Ok(Some(payeezy_req))
     }
+
 
     fn build_request(
         &self,
